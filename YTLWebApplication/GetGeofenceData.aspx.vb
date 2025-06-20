@@ -1,93 +1,124 @@
-﻿Imports System.Data
+Imports System.Data
 Imports System.Data.SqlClient
 Imports System.IO
 Imports System.Collections.Generic
 Imports Newtonsoft.Json
+
 Public Class GetGeofenceData
-    Inherits System.Web.UI.Page
+    Inherits SecurePageBase
+    Implements IRequiresCSRF
 
     Protected Sub Page_Load(ByVal sender As Object, ByVal e As System.EventArgs) Handles Me.Load
-        Dim operation As String = Request.QueryString("op")
-        Select Case operation
-            Case "0"
-                Response.Write(loadOssShipToCodeData())
-            Case "1"
-                Response.Write(loadAvlsGeofenceData())
-            Case "2"
-                Response.Write(UpdateOssNewShipToCode(Request.QueryString("geofenceID"), Request.QueryString("newSTC"), Request.QueryString("name")))
-        End Select
-        Response.ContentType = "text/plain"
+        Try
+            ' Validate authentication
+            If Not AuthenticationHelper.IsUserAuthenticated() Then
+                Response.StatusCode = 401
+                Response.End()
+                Return
+            End If
+            
+            Dim operation As String = SecurityHelper.SanitizeForHtml(Request.QueryString("op"))
+            
+            ' Validate CSRF token for state-changing operations
+            If operation = "2" Then
+                If Not ValidateCSRF(Request.Form("__CSRFToken")) Then
+                    Response.StatusCode = 403
+                    Response.Write("{""error"":""Invalid request""}")
+                    Response.End()
+                    Return
+                End If
+            End If
+            
+            Select Case operation
+                Case "0"
+                    Response.Write(loadOssShipToCodeData())
+                Case "1"
+                    Response.Write(loadAvlsGeofenceData())
+                Case "2"
+                    Dim geofenceID As String = SecurityHelper.SanitizeForHtml(Request.QueryString("geofenceID"))
+                    Dim newSTC As String = SecurityHelper.SanitizeForHtml(Request.QueryString("newSTC"))
+                    Dim name As String = SecurityHelper.SanitizeForHtml(Request.QueryString("name"))
+                    Response.Write(UpdateOssNewShipToCode(geofenceID, newSTC, name))
+                Case Else
+                    Response.StatusCode = 400
+                    Response.Write("{""error"":""Invalid operation""}")
+            End Select
+            
+            Response.ContentType = "application/json"
+            
+        Catch ex As Exception
+            SecurityHelper.LogError("GetGeofenceData error", ex, Server)
+            Response.StatusCode = 500
+            Response.Write("{""error"":""Internal server error""}")
+        End Try
     End Sub
 
     Public Function loadOssShipToCodeData() As String
         Dim aa As New ArrayList()
         Dim a As ArrayList
         Dim json As String = ""
-        Dim firstpoint As String = ""
-        Dim geofencetable As New DataTable
-        geofencetable.Rows.Clear()
-        geofencetable.Columns.Add(New DataColumn("S No"))
-        geofencetable.Columns.Add(New DataColumn("Name"))
-        geofencetable.Columns.Add(New DataColumn("Ship To Code"))
-        geofencetable.Columns.Add(New DataColumn("Address"))
-        geofencetable.Columns.Add(New DataColumn(""))
+        
         Try
-            Dim userslist As String = Request.Cookies("userinfo")("userslist")
-            Dim conn As New SqlConnection(System.Configuration.ConfigurationManager.AppSettings("sqlserverconnection"))
-            Dim cmd As New SqlCommand()
-            cmd.Connection = conn
-            cmd.CommandText = "select * from oss_ship_to_code where OssSTC=0 order by name"
-            Try
-                conn.Open()
-                Dim r As DataRow
-                Dim dr As SqlDataReader = cmd.ExecuteReader
-                While dr.Read
-                    r = geofencetable.NewRow
-                    r(0) = dr("shiptocode")
-                    r(1) = dr("name").ToString
-                    r(2) = dr("shiptocode")
-                    If IsDBNull(dr("address5")) Then
-                        r(3) = ""
-                    ElseIf dr("address5") = "" Then
-                        r(3) = ""
-                    Else
-                        r(3) = dr("address5").ToString.Replace(vbCr, " ").Replace(vbLf, " ")
-                    End If
-                    r(4) = "<a href=""javascript:void(0)"" onclick=""MoveShipToCode('" & dr("shiptocode").ToString & "','" & dr("name").ToString & "')"" title=""Copy ShipToCode"" id='" & dr("shiptocode").ToString & "a'><img src='images/rightarrow.png' alt='right' style='width:12px;height:12px;' id='" & dr("shiptocode").ToString & "i'/></a>"
-                    geofencetable.Rows.Add(r)
-                End While
-                If geofencetable.Rows.Count = 0 Then
-                    r = geofencetable.NewRow
-                    r(0) = 1
-                    r(1) = "-"
-                    r(2) = "-"
-                    r(3) = "-"
-                    r(4) = "-"
-                    geofencetable.Rows.Add(r)
+            ' Validate user access
+            Dim userslist As String = SecurityHelper.ValidateAndGetUsersList(Request)
+            
+            Dim geofencetable As New DataTable
+            geofencetable.Columns.Add(New DataColumn("S No"))
+            geofencetable.Columns.Add(New DataColumn("Name"))
+            geofencetable.Columns.Add(New DataColumn("Ship To Code"))
+            geofencetable.Columns.Add(New DataColumn("Address"))
+            geofencetable.Columns.Add(New DataColumn(""))
+
+            Dim parameters As New Dictionary(Of String, Object)
+            parameters.Add("@ossSTC", 0)
+            
+            Dim query As String = "SELECT * FROM oss_ship_to_code WHERE OssSTC = @ossSTC ORDER BY name"
+            Dim shipToData As DataTable = DatabaseHelper.ExecuteQuery(query, parameters)
+            
+            For Each dr As DataRow In shipToData.Rows
+                Dim r As DataRow = geofencetable.NewRow
+                r(0) = dr("shiptocode")
+                r(1) = SanitizeOutput(dr("name").ToString())
+                r(2) = dr("shiptocode")
+                
+                If IsDBNull(dr("address5")) OrElse dr("address5").ToString() = "" Then
+                    r(3) = ""
+                Else
+                    r(3) = SanitizeOutput(dr("address5").ToString().Replace(vbCr, " ").Replace(vbLf, " "))
                 End If
-                For i As Integer = 0 To geofencetable.Rows.Count - 1
-                    Try
-                        a = New ArrayList
-                        a.Add(geofencetable.DefaultView.Item(i)(0))
-                        a.Add(geofencetable.DefaultView.Item(i)(1))
-                        a.Add(geofencetable.DefaultView.Item(i)(2))
-                        a.Add(geofencetable.DefaultView.Item(i)(3))
-                        a.Add(geofencetable.DefaultView.Item(i)(4))
-                        aa.Add(a)
-                    Catch ex As Exception
-
-                    End Try
+                
+                r(4) = "<a href=""javascript:void(0)"" onclick=""MoveShipToCode('" & SanitizeOutput(dr("shiptocode").ToString()) & "','" & SanitizeOutput(dr("name").ToString()) & "')"" title=""Copy ShipToCode"" id='" & SanitizeOutput(dr("shiptocode").ToString()) & "a'><img src='images/rightarrow.png' alt='right' style='width:12px;height:12px;' id='" & SanitizeOutput(dr("shiptocode").ToString()) & "i'/></a>"
+                geofencetable.Rows.Add(r)
+            Next
+            
+            If geofencetable.Rows.Count = 0 Then
+                Dim r As DataRow = geofencetable.NewRow
+                For i As Integer = 0 To 4
+                    r(i) = "-"
                 Next
-            Catch ex As Exception
-
-            Finally
-                conn.Close()
-            End Try
-
+                geofencetable.Rows.Add(r)
+            End If
+            
+            For i As Integer = 0 To geofencetable.Rows.Count - 1
+                Try
+                    a = New ArrayList
+                    For j As Integer = 0 To 4
+                        a.Add(geofencetable.DefaultView.Item(i)(j))
+                    Next
+                    aa.Add(a)
+                Catch ex As Exception
+                    SecurityHelper.LogError("Row processing error", ex, Server)
+                End Try
+            Next
+            
+            json = JsonConvert.SerializeObject(aa, Formatting.None)
+            AuditLogger.LogDataAccess("oss_ship_to_code", "READ")
+            
         Catch ex As Exception
-
+            SecurityHelper.LogError("loadOssShipToCodeData error", ex, Server)
+            json = "{""error"":""Data loading failed""}"
         End Try
-        json = JsonConvert.SerializeObject(aa, Formatting.None)
+        
         Return json
     End Function
 
@@ -95,176 +126,147 @@ Public Class GetGeofenceData
         Dim aa As New ArrayList()
         Dim a As ArrayList
         Dim json As String = ""
-        Dim firstpoint As String = ""
-        Dim geofencetable As New DataTable
-        geofencetable.Rows.Clear()
-        geofencetable.Columns.Add(New DataColumn("S No"))
-        geofencetable.Columns.Add(New DataColumn("Geofence Name"))
-        geofencetable.Columns.Add(New DataColumn("Address"))
-        geofencetable.Columns.Add(New DataColumn("ShipToCode"))
+        
         Try
-            Dim userslist As String = Request.Cookies("userinfo")("userslist")
-            Dim conn As New SqlConnection(System.Configuration.ConfigurationManager.AppSettings("sqlserverconnection"))
-            Dim cmd As New SqlCommand()
-            cmd.Connection = conn
-            cmd.CommandText = "select * from geofence order by geofencename"
-            Try
-                conn.Open()
-                Dim r As DataRow
-                Dim dr As SqlDataReader = cmd.ExecuteReader
-                While dr.Read
-                    r = geofencetable.NewRow
-                    Dim latlng As String = ""
-                    If (dr("geofencetype")) Then
-                        latlng = dr("data").ToString.Split(";")(0)
-                        latlng = latlng.Split(",")(1) & "," & latlng.Split(",")(0)
+            Dim geofencetable As New DataTable
+            geofencetable.Columns.Add(New DataColumn("S No"))
+            geofencetable.Columns.Add(New DataColumn("Geofence Name"))
+            geofencetable.Columns.Add(New DataColumn("Address"))
+            geofencetable.Columns.Add(New DataColumn("ShipToCode"))
+
+            Dim query As String = "SELECT * FROM geofence ORDER BY geofencename"
+            Dim geofenceData As DataTable = DatabaseHelper.ExecuteQuery(query, Nothing)
+            
+            For Each dr As DataRow In geofenceData.Rows
+                Dim r As DataRow = geofencetable.NewRow
+                Dim latlng As String = ""
+                
+                Try
+                    If CBool(dr("geofencetype")) Then
+                        latlng = dr("data").ToString().Split(";"c)(0)
+                        latlng = latlng.Split(","c)(1) & "," & latlng.Split(","c)(0)
                     Else
-                        latlng = dr("data").ToString.Split(",")(1) & "," & dr("data").ToString.Split(",")(0)
+                        latlng = dr("data").ToString().Split(","c)(1) & "," & dr("data").ToString().Split(","c)(0)
                     End If
-                    r(0) = dr("geofenceid")
-                    r(1) = "<span id='" & dr("geofenceid") & "' style='cursor:pointer;' onclick='selectSTC(this)'>" & dr("geofencename").ToString() & "</span>"
-                    r(2) = "<a href='http://maps.google.com/maps?f=q&hl=en&q=" & latlng & "&om=1&t=k' target='_blank' style='text-decoration:none;color:blue;'>" & latlng & "</a>"
-                    r(3) = "<span id='" & dr("geofenceid") & "s'>" & dr("shiptocode") & "</span"
-                    geofencetable.Rows.Add(r)
-                End While
-                If geofencetable.Rows.Count = 0 Then
-                    r = geofencetable.NewRow
-                    r(0) = 1
-                    r(1) = "-"
-                    r(2) = "-"
-                    r(3) = "-"
-                    geofencetable.Rows.Add(r)
-                End If
-                For i As Integer = 0 To geofencetable.Rows.Count - 1
-                    Try
-                        a = New ArrayList
-                        a.Add(geofencetable.DefaultView.Item(i)(0))
-                        a.Add(geofencetable.DefaultView.Item(i)(1))
-                        a.Add(geofencetable.DefaultView.Item(i)(2))
-                        a.Add(geofencetable.DefaultView.Item(i)(3))
-                        aa.Add(a)
-                    Catch ex As Exception
-
-                    End Try
+                Catch ex As Exception
+                    latlng = "0,0"
+                End Try
+                
+                r(0) = dr("geofenceid")
+                r(1) = "<span id='" & SanitizeOutput(dr("geofenceid").ToString()) & "' style='cursor:pointer;' onclick='selectSTC(this)'>" & SanitizeOutput(dr("geofencename").ToString()) & "</span>"
+                r(2) = "<a href='https://maps.google.com/maps?f=q&hl=en&q=" & SecurityHelper.UrlEncode(latlng) & "&om=1&t=k' target='_blank' style='text-decoration:none;color:blue;'>" & SanitizeOutput(latlng) & "</a>"
+                r(3) = "<span id='" & SanitizeOutput(dr("geofenceid").ToString()) & "s'>" & SanitizeOutput(dr("shiptocode").ToString()) & "</span>"
+                geofencetable.Rows.Add(r)
+            Next
+            
+            If geofencetable.Rows.Count = 0 Then
+                Dim r As DataRow = geofencetable.NewRow
+                For i As Integer = 0 To 3
+                    r(i) = "-"
                 Next
-            Catch ex As Exception
-
-            Finally
-                conn.Close()
-            End Try
-
+                geofencetable.Rows.Add(r)
+            End If
+            
+            For i As Integer = 0 To geofencetable.Rows.Count - 1
+                Try
+                    a = New ArrayList
+                    For j As Integer = 0 To 3
+                        a.Add(geofencetable.DefaultView.Item(i)(j))
+                    Next
+                    aa.Add(a)
+                Catch ex As Exception
+                    SecurityHelper.LogError("Row processing error", ex, Server)
+                End Try
+            Next
+            
+            json = JsonConvert.SerializeObject(aa, Formatting.None)
+            AuditLogger.LogDataAccess("geofence", "READ")
+            
         Catch ex As Exception
-
+            SecurityHelper.LogError("loadAvlsGeofenceData error", ex, Server)
+            json = "{""error"":""Data loading failed""}"
         End Try
-        json = JsonConvert.SerializeObject(aa, Formatting.None)
+        
         Return json
     End Function
-
-    'Public Function loadOssGeofenceData() As String
-    '    Dim aa As New ArrayList()
-    '    Dim a As ArrayList
-    '    Dim json As String = ""
-    '    Dim firstpoint As String = ""
-    '    Dim geofencetable As New DataTable
-    '    geofencetable.Rows.Clear()
-    '    geofencetable.Columns.Add(New DataColumn("S No"))
-    '    geofencetable.Columns.Add(New DataColumn("Geofence Name"))
-    '    geofencetable.Columns.Add(New DataColumn("Address"))
-    '    geofencetable.Columns.Add(New DataColumn("ShipToCode"))
-    '    geofencetable.Columns.Add(New DataColumn("New ShipToCode"))
-    '    Try
-    '        Dim userslist As String = Request.Cookies("userinfo")("userslist")
-    '        Dim conn As New SqlConnection(System.Configuration.ConfigurationManager.AppSettings("sqlserverconnection"))
-    '        Dim cmd As New SqlCommand()
-    '        cmd.Connection = conn
-    '        cmd.CommandText = "select * from oss_geofence_table where new_shiptocode is null order by geofencename"
-    '        Try
-    '            conn.Open()
-    '            Dim r As DataRow
-    '            Dim dr As SqlDataReader = cmd.ExecuteReader
-    '            While dr.Read
-    '                r = geofencetable.NewRow
-    '                Dim latlng As String = ""
-    '                If (dr("geofencetype")) Then
-    '                    latlng = dr("data").ToString.Split(";")(0)
-    '                    latlng = latlng.Split(",")(1) & "," & latlng.Split(",")(0)
-    '                Else
-    '                    latlng = dr("data").ToString.Split(",")(1) & "," & dr("data").ToString.Split(",")(0)
-    '                End If
-    '                r(0) = dr("geofenceid")
-    '                r(1) = "<span id='" & dr("geofenceid") & "' style='cursor:pointer;' onclick='selectSTC(this)'>" & dr("geofencename").ToString() & "</span>"
-    '                r(2) = "<a href='http://maps.google.com/maps?f=q&hl=en&q=" & latlng & "&om=1&t=k' target='_blank' style='text-decoration:none;color:blue;'>" & latlng & "</a>"
-    '                r(3) = dr("old_shiptocode")
-    '                r(4) = dr("new_shiptocode")
-    '                geofencetable.Rows.Add(r)
-    '            End While
-    '            If geofencetable.Rows.Count = 0 Then
-    '                r = geofencetable.NewRow
-    '                r(0) = 1
-    '                r(1) = "-"
-    '                r(2) = "-"
-    '                r(3) = "-"
-    '                r(4) = "-"
-    '                geofencetable.Rows.Add(r)
-    '            End If
-    '            For i As Integer = 0 To geofencetable.Rows.Count - 1
-    '                Try
-    '                    a = New ArrayList
-    '                    a.Add(geofencetable.DefaultView.Item(i)(0))
-    '                    a.Add(geofencetable.DefaultView.Item(i)(1))
-    '                    a.Add(geofencetable.DefaultView.Item(i)(2))
-    '                    a.Add(geofencetable.DefaultView.Item(i)(3))
-    '                    a.Add(geofencetable.DefaultView.Item(i)(4))
-    '                    aa.Add(a)
-    '                Catch ex As Exception
-
-    '                End Try
-    '            Next
-    '        Catch ex As Exception
-
-    '        Finally
-    '            conn.Close()
-    '        End Try
-
-    '    Catch ex As Exception
-
-    '    End Try
-    '    json = JsonConvert.SerializeObject(aa, Formatting.None)
-    '    Return json
-    'End Function
 
     Public Function UpdateOssNewShipToCode(ByVal gid As String, ByVal newSTC As String, ByVal name As String) As String
         Dim aa As New ArrayList()
         Dim json As String = ""
-        Dim conn As New SqlConnection(System.Configuration.ConfigurationManager.AppSettings("sqlserverconnection"))
-        Dim cmd As New SqlCommand()
-        Dim cmd1 As New SqlCommand()
-        cmd.Connection = conn
-        cmd1.Connection = conn
-        conn.Open()
-        Dim sqltrans As SqlTransaction
-        sqltrans = conn.BeginTransaction()
-        'cmd.CommandText = "update avls_geofence_table set new_shiptocode='" & newSTC & "',ossname='" & name & "',ossaddress5='" & address & "' where geofenceid='" & gid & "'"
-        cmd.CommandText = "update geofence set shiptocode='" & newSTC & "',geofencename='" & name & "'  where geofenceid='" & gid & "'"
-        cmd1.CommandText = "update oss_ship_to_code set OssSTC=" & 1 & " where shiptocode='" & newSTC & "'"
+        
         Try
-            If Not cmd.CommandText = "" Then
-                cmd.Transaction = sqltrans
-                cmd.ExecuteNonQuery()
+            ' Validate inputs
+            Dim geofenceId As Integer
+            If Not Integer.TryParse(gid, geofenceId) OrElse geofenceId <= 0 Then
+                aa.Add("0")
+                json = JsonConvert.SerializeObject(aa, Formatting.None)
+                Return json
             End If
-            If Not cmd1.CommandText = "" Then
-                cmd1.Transaction = sqltrans
-                cmd1.ExecuteNonQuery()
+            
+            If String.IsNullOrWhiteSpace(newSTC) OrElse String.IsNullOrWhiteSpace(name) Then
+                aa.Add("0")
+                json = JsonConvert.SerializeObject(aa, Formatting.None)
+                Return json
             End If
-            sqltrans.Commit()
-            aa.Add("1")
+            
+            ' Validate name and STC lengths
+            If name.Length > 100 OrElse newSTC.Length > 50 Then
+                aa.Add("0")
+                json = JsonConvert.SerializeObject(aa, Formatting.None)
+                Return json
+            End If
+            
+            Using conn As SqlConnection = DatabaseHelper.CreateSecureConnection()
+                conn.Open()
+                Using transaction As SqlTransaction = conn.BeginTransaction()
+                    Try
+                        ' Update geofence
+                        Dim geofenceParams As New Dictionary(Of String, Object)
+                        geofenceParams.Add("@shiptocode", newSTC)
+                        geofenceParams.Add("@geofencename", name)
+                        geofenceParams.Add("@geofenceid", gid)
+                        
+                        Dim geofenceQuery As String = "UPDATE geofence SET shiptocode = @shiptocode, geofencename = @geofencename WHERE geofenceid = @geofenceid"
+                        
+                        Using cmd1 As SqlCommand = New SqlCommand(geofenceQuery, conn, transaction)
+                            For Each param In geofenceParams
+                                cmd1.Parameters.AddWithValue(param.Key, param.Value)
+                            Next
+                            cmd1.ExecuteNonQuery()
+                        End Using
+                        
+                        ' Update OSS ship to code
+                        Dim ossParams As New Dictionary(Of String, Object)
+                        ossParams.Add("@ossSTC", 1)
+                        ossParams.Add("@shiptocode", newSTC)
+                        
+                        Dim ossQuery As String = "UPDATE oss_ship_to_code SET OssSTC = @ossSTC WHERE shiptocode = @shiptocode"
+                        
+                        Using cmd2 As SqlCommand = New SqlCommand(ossQuery, conn, transaction)
+                            For Each param In ossParams
+                                cmd2.Parameters.AddWithValue(param.Key, param.Value)
+                            Next
+                            cmd2.ExecuteNonQuery()
+                        End Using
+                        
+                        transaction.Commit()
+                        aa.Add("1")
+                        
+                        AuditLogger.LogUserAction("GEOFENCE_UPDATE", "Updated geofence ID: " & gid & " with STC: " & newSTC)
+                        
+                    Catch ex As Exception
+                        transaction.Rollback()
+                        SecurityHelper.LogError("UpdateOssNewShipToCode transaction error", ex, Server)
+                        aa.Add("0")
+                    End Try
+                End Using
+            End Using
+            
         Catch ex As Exception
-            Dim error1 As String = ex.Message
+            SecurityHelper.LogError("UpdateOssNewShipToCode error", ex, Server)
             aa.Add("0")
-            sqltrans.Rollback()
-        Finally
-            conn.Close()
         End Try
+        
         json = JsonConvert.SerializeObject(aa, Formatting.None)
         Return json
     End Function

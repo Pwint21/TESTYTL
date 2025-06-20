@@ -1,99 +1,123 @@
-﻿Imports System.Data.SqlClient
+Imports System.Data.SqlClient
 Imports Newtonsoft.Json
 Imports AspMap
+
 Public Class GetGeofenceGeoJson
-    Inherits System.Web.UI.Page
+    Inherits SecurePageBase
 
-    Protected Overrides Sub OnInit(ByVal e As System.EventArgs)
-        Try
-            If Request.Cookies("userinfo") Is Nothing Then
-                Response.Redirect("Login.aspx")
-            End If
-
-        Catch ex As Exception
-
-        End Try
-        MyBase.OnInit(e)
-    End Sub
     Protected Sub Page_Load(sender As Object, e As EventArgs) Handles Me.Load
         Try
+            ' Validate authentication
+            If Not AuthenticationHelper.IsUserAuthenticated() Then
+                Response.StatusCode = 401
+                Response.Write("{""error"":""Unauthorized""}")
+                Response.End()
+                Return
+            End If
+            
             Dim json As String = ""
-            Dim geofenceid As String = Request.QueryString("gid")
-            If Not geofenceid Is Nothing Then
-                Dim conn As New SqlConnection(System.Configuration.ConfigurationManager.AppSettings("sqlserverconnection"))
-                Dim cmd As SqlCommand = New SqlCommand("select * from geofence where geofenceid =@gid", conn)
-                cmd.Parameters.AddWithValue("gid", geofenceid)
-                Dim dr As SqlDataReader
-
+            Dim geofenceid As String = SecurityHelper.SanitizeForHtml(Request.QueryString("gid"))
+            
+            If String.IsNullOrEmpty(geofenceid) Then
+                Response.StatusCode = 400
+                Response.Write("{""error"":""Missing geofence ID""}")
+                Response.End()
+                Return
+            End If
+            
+            ' Validate geofence ID
+            Dim geoId As Integer
+            If Not Integer.TryParse(geofenceid, geoId) OrElse geoId <= 0 Then
+                Response.StatusCode = 400
+                Response.Write("{""error"":""Invalid geofence ID""}")
+                Response.End()
+                Return
+            End If
+            
+            Dim parameters As New Dictionary(Of String, Object)
+            parameters.Add("@geofenceid", geofenceid)
+            
+            Dim query As String = "SELECT * FROM geofence WHERE geofenceid = @geofenceid"
+            Dim geofenceData As DataTable = DatabaseHelper.ExecuteQuery(query, parameters)
+            
+            Dim aa As New ArrayList()
+            
+            For Each dr As DataRow In geofenceData.Rows
                 Try
-                    conn.Open()
+                    Dim at As Integer = 0
+                    Dim status As Byte = 0
+                    Dim a As New ArrayList()
+                    
+                    If dr("accesstype").ToString() = "1" Then
+                        at = 1
+                    ElseIf dr("accesstype").ToString() = "0" Then
+                        at = 0
+                    Else
+                        at = 2
+                    End If
+                    
+                    If CBool(dr("status")) Then
+                        status = 1
+                    Else
+                        status = 0
+                    End If
 
-                    dr = cmd.ExecuteReader()
+                    a.Add(status)
+                    a.Add(at)
+                    a.Add(Convert.ToUInt32(dr("geofenceid")))
+                    a.Add(SanitizeOutput(dr("geofencename").ToString()))
+                    a.Add(SanitizeOutput(dr("data").ToString()))
 
-                    Dim aa As New ArrayList()
+                    Try
+                        Dim polygonShape As New AspMap.Shape
+                        polygonShape.ShapeType = ShapeType.mcPolygonShape
 
-                    While (dr.Read)
-                        Try
-                            Dim at As Integer = 0
-                            Dim status As Byte = 0
-                            Dim a As New ArrayList()
-                            If dr("accesstype") = "1" Then
-                                at = 1
-                            ElseIf dr("accesstype") = "0" Then
-                                at = 0
-                            Else
-                                at = 2
-                            End If
-                            If dr("status") Then
-                                status = 1
-                            Else
-                                status = 0
-                            End If
+                        Dim shpPoints As New AspMap.Points()
+                        Dim points() As String = dr("data").ToString().Split(";"c)
+                        Dim values() As String
 
-                            a.Add(status)
-                            a.Add(at)
-                            a.Add(Convert.ToUInt32(dr("geofenceid")))
-                            a.Add(dr("geofencename"))
-                            a.Add(dr("data").ToString())
-
-                            Dim polygonShape As New AspMap.Shape
-                            polygonShape.ShapeType = ShapeType.mcPolygonShape
-
-                            Dim shpPoints As New AspMap.Points()
-                            Dim points() As String = dr("data").Split(";")
-                            Dim values() As String
-
-                            For i As Integer = 0 To points.Length - 1
-                                values = points(i).Split(",")
-                                If (values.Length = 2) Then
-                                    shpPoints.AddPoint(Convert.ToDouble(values(0)), Convert.ToDouble(values(1)))
+                        For i As Integer = 0 To points.Length - 1
+                            values = points(i).Split(","c)
+                            If values.Length = 2 Then
+                                Dim lat, lng As Double
+                                If Double.TryParse(values(0), lat) AndAlso Double.TryParse(values(1), lng) Then
+                                    If SecurityHelper.ValidateCoordinate(lat.ToString(), lng.ToString()) Then
+                                        shpPoints.AddPoint(lat, lng)
+                                    End If
                                 End If
-                            Next
+                            End If
+                        Next
+                        
+                        If shpPoints.Count > 0 Then
                             a.Add(shpPoints.Centroid.Y)
                             a.Add(shpPoints.Centroid.X)
-                            aa.Add(a)
-                        Catch ex As Exception
-                            Response.Write(ex.Message)
-                        End Try
-                    End While
-
-                    Dim jss As New Newtonsoft.Json.JsonSerializer()
-                    json = JsonConvert.SerializeObject(aa, Formatting.None)
-
+                        Else
+                            a.Add(0)
+                            a.Add(0)
+                        End If
+                    Catch ex As Exception
+                        SecurityHelper.LogError("Geofence coordinate processing error", ex, Server)
+                        a.Add(0)
+                        a.Add(0)
+                    End Try
+                    
+                    aa.Add(a)
                 Catch ex As Exception
-                    Response.Write(ex.Message)
-                Finally
-                    conn.Close()
+                    SecurityHelper.LogError("Geofence data processing error", ex, Server)
                 End Try
+            Next
 
-                Response.Write(json)
-                Response.ContentType = "application/json"
-            End If
-
+            json = JsonConvert.SerializeObject(aa, Formatting.None)
+            
+            Response.Write(json)
+            Response.ContentType = "application/json"
+            
+            AuditLogger.LogDataAccess("geofence", "READ", geofenceid)
 
         Catch ex As Exception
-            Response.Write(ex.Message)
+            SecurityHelper.LogError("GetGeofenceGeoJson error", ex, Server)
+            Response.StatusCode = 500
+            Response.Write("{""error"":""Internal server error""}")
         End Try
     End Sub
-
 End Class

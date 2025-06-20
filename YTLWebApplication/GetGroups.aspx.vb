@@ -1,68 +1,74 @@
-﻿Imports Newtonsoft.Json
+Imports Newtonsoft.Json
 Imports System.Data.SqlClient
 
 Partial Class GetGroups
-    Inherits System.Web.UI.Page
+    Inherits SecurePageBase
 
     Protected Sub Page_Load(sender As Object, e As System.EventArgs) Handles Me.Load
         Try
-            Dim userid As String = Request.Cookies("userinfo")("userid")
-            Dim role As String = Request.Cookies("userinfo")("role")
-            Dim userslist As String = Request.Cookies("userinfo")("userslist")
-            Dim qs As String = ""
-            qs = Request.QueryString("userid")
+            ' Validate authentication
+            If Not AuthenticationHelper.IsUserAuthenticated() Then
+                Response.StatusCode = 401
+                Response.Write("{""error"":""Unauthorized""}")
+                Response.End()
+                Return
+            End If
+            
+            ' Validate user access
+            Dim userid As String = SecurityHelper.ValidateAndGetUserId(Request)
+            Dim role As String = SecurityHelper.ValidateAndGetUserRole(Request)
+            Dim userslist As String = SecurityHelper.ValidateAndGetUsersList(Request)
+            
+            Dim qs As String = SecurityHelper.SanitizeForHtml(Request.QueryString("userid"))
             Dim json As String = ""
-            Dim conn As New SqlConnection(System.Configuration.ConfigurationManager.AppSettings("sqlserverconnection"))
-            Dim cmd As SqlCommand
+            
+            Dim parameters As New Dictionary(Of String, Object)
+            Dim query As String
+            
             If role = "User" Then
-                cmd = New SqlCommand("select groupid,groupname from vehicle_group where userid='" & userid & "' order by groupname", conn)
+                query = "SELECT groupid, groupname FROM vehicle_group WHERE userid = @userid ORDER BY groupname"
+                parameters.Add("@userid", userid)
             ElseIf role = "SuperUser" Or role = "Operator" Then
                 If qs <> "ALLUSERS" Then
-                    cmd = New SqlCommand("select groupid,groupname from vehicle_group where  userid ='" & qs & "' order by groupname", conn)
+                    query = "SELECT groupid, groupname FROM vehicle_group WHERE userid = @userid ORDER BY groupname"
+                    parameters.Add("@userid", qs)
                 Else
-                    cmd = New SqlCommand("select groupid,groupname from vehicle_group where  userid in(" & userslist & ") order by groupname", conn)
+                    query = "SELECT groupid, groupname FROM vehicle_group WHERE userid IN (" & userslist & ") ORDER BY groupname"
                 End If
             Else
                 If qs <> "ALLUSERS" Then
-                    cmd = New SqlCommand("select groupid,groupname from vehicle_group where userid='" & qs & "' order by groupname", conn)
+                    query = "SELECT groupid, groupname FROM vehicle_group WHERE userid = @userid ORDER BY groupname"
+                    parameters.Add("@userid", qs)
                 Else
-                    cmd = New SqlCommand("select groupid,groupname from vehicle_group  order by groupname", conn)
+                    query = "SELECT groupid, groupname FROM vehicle_group ORDER BY groupname"
                 End If
             End If
-            Dim dr As SqlDataReader
-
-
+            
+            Dim groupData As DataTable = DatabaseHelper.ExecuteQuery(query, parameters)
             Dim aa As New ArrayList()
 
-            Try
-                conn.Open()
-                dr = cmd.ExecuteReader()
+            For Each dr As DataRow In groupData.Rows
+                Try
+                    Dim a As New ArrayList()
+                    a.Add(dr("groupid"))
+                    a.Add(SanitizeOutput(dr("groupname").ToString().ToUpper()))
+                    aa.Add(a)
+                Catch ex As Exception
+                    SecurityHelper.LogError("Group row processing error", ex, Server)
+                End Try
+            Next
 
-                While dr.Read()
-                    Try
-                        Dim a As New ArrayList()
-                        a.Add(dr("groupid"))
-                        a.Add(dr("groupname").ToString.ToUpper())
-                        aa.Add(a)
-                    Catch ex As Exception
-
-                    End Try
-                End While
-
-                Dim jss As New Newtonsoft.Json.JsonSerializer()
-
-
-                json = JsonConvert.SerializeObject(aa, Formatting.None)
-            Catch ex As Exception
-
-            Finally
-                conn.Close()
-            End Try
+            json = JsonConvert.SerializeObject(aa, Formatting.None)
+            
             Response.Write(json)
-            Response.ContentType = "text/plain"
+            Response.ContentType = "application/json"
+            
+            AuditLogger.LogDataAccess("vehicle_group", "READ")
+            
         Catch ex As Exception
-
+            SecurityHelper.LogError("GetGroups error", ex, Server)
+            Response.StatusCode = 500
+            Response.Write("{""error"":""Internal server error""}")
         End Try
-
     End Sub
 End Class
